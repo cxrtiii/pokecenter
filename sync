@@ -1,0 +1,183 @@
+-- Synchronized Audioplayer script by GroupXyz
+-- Version: 3.1
+ 
+-- Required peripherals: modem (for networking), speaker
+ 
+local dfpwm = require("cc.audio.dfpwm")
+local decoder = dfpwm.make_decoder()
+ 
+-- Find all modems (wired and wireless)
+local modems = {}
+for _, name in ipairs(peripheral.getNames()) do
+    if peripheral.getType(name) == "modem" then
+        table.insert(modems, peripheral.wrap(name))
+    end
+end
+ 
+if #modems == 0 then
+    error("No modems found. Please attach at least one modem.")
+end
+ 
+-- Open channel 1234 on all modems
+for _, modem in ipairs(modems) do
+    modem.open(1234)
+end
+ 
+local currentPlayingFile = nil
+local lastSignalTime = nil
+ 
+function loadFileList(interface)
+    local fileList = {}
+    for _, file in ipairs(fs.list(interface)) do
+        if not fs.isDir(interface.."/"..file) then
+            table.insert(fileList, file)
+        end
+    end
+    return fileList
+end
+ 
+--function displayFileList(fileList)
+--    term.clear()
+--    term.setCursorPos(1, 1)
+--    print("----------Audioplayer by GroupXyz----------")
+--    print("Please place your audio files in the folder 'sounds/'")
+--    print("Files:")
+--    for i, file in ipairs(fileList) do
+--        print(i..". "..file)
+--    end
+--    if currentPlayingFile then
+--        print("\nCurrently playing: " .. currentPlayingFile)
+--    end
+--end
+ 
+local currentPage = 1
+local itemsPerPage = 10
+ 
+function paginate(fileList, page, itemsPerPage)
+    local startIdx = (page - 1) * itemsPerPage + 1
+    local endIdx = math.min(page * itemsPerPage, #fileList)
+    local paginatedList = {}
+    for i = startIdx, endIdx do
+        table.insert(paginatedList, fileList[i])
+    end
+    return paginatedList
+end
+ 
+function displayFileList(fileList)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("----------Audioplayer by GroupXyz----------")
+    print("Please place your audio files in the folder 'sounds/'")
+    print("Files (Page " .. currentPage .. "):")
+    
+    local paginatedList = paginate(fileList, currentPage, itemsPerPage)
+    for i, file in ipairs(paginatedList) do
+        print((i + (currentPage - 1) * itemsPerPage) .. ". " .. file)
+    end
+    
+    if currentPlayingFile then
+        print("\nCurrently playing: " .. currentPlayingFile)
+    end
+    
+    print("\nUse 'n' for next page, 'p' for previous page")
+end
+ 
+function playFile(interface, selectedFile, loop)
+    local filePath = interface.."/"..selectedFile
+    if fs.exists(filePath) and not fs.isDir(filePath) then
+        currentPlayingFile = selectedFile
+        local speaker = peripheral.find("speaker")
+        if speaker then
+            local function playBuffer(buffer)
+                while not speaker.playAudio(buffer) do
+                    os.pullEvent("speaker_audio_empty")
+                end
+            end
+ 
+            if loop then
+                while true do
+                    for chunk in io.lines(filePath, 16 * 1024) do
+                        local buffer = decoder(chunk)
+                        playBuffer(buffer)
+                        sleep(0.05)
+                    end
+                end
+            else
+                for chunk in io.lines(filePath, 16 * 1024) do
+                    local buffer = decoder(chunk)
+                    playBuffer(buffer)
+                    sleep(0.05)
+                end
+            end
+        else
+            print("Speaker not found.")
+        end
+    else
+        print("File not found.")
+    end
+end
+ 
+function sendSyncSignal(fileName)
+    for _, modem in ipairs(modems) do
+        modem.transmit(1234, 1234, { command = "play", file = fileName, timestamp = os.epoch("utc") })
+    end
+    playFile("sounds", fileName, false) -- Play locally as well
+end
+ 
+function listenForCommands(interface)
+    while true do
+        local event, side, channel, replyChannel, message = os.pullEvent("modem_message")
+        if channel == 1234 and type(message) == "table" and message.command == "play" then
+            local fileName = message.file
+            local timestamp = message.timestamp
+ 
+            -- Check if the signal is newer than the last signal
+            if not lastSignalTime or timestamp > lastSignalTime then
+                lastSignalTime = timestamp
+                print("Received play command for file: "..fileName)
+                playFile(interface, fileName, false)
+            end
+        end
+    end
+end
+ 
+-- Main program
+local interface = "sounds/"
+if not fs.exists(interface) then
+    fs.makeDir(interface)
+end
+local fileList = loadFileList("sounds")
+displayFileList(fileList)
+ 
+parallel.waitForAny(function()
+    while true do
+        displayFileList(fileList)
+        print("Which file do you want to play? (Type 0 to exit)")
+        local choice = read()
+ 
+        if choice == "0" then
+            break
+        elseif tonumber(choice) and fileList[tonumber(choice)] then
+            local selectedFile = fileList[tonumber(choice)]
+            if currentPlayingFile ~= selectedFile then
+                print("Sending play command for file: "..selectedFile)
+                sendSyncSignal(selectedFile)
+            else
+                print("File is already playing.")
+            end
+        elseif choice == "n" then
+            if currentPage * itemsPerPage < #fileList then
+                currentPage = currentPage + 1
+            end
+        elseif choice == "p" then
+            if currentPage > 1 then
+                currentPage = currentPage - 1
+            end        
+        else
+            print("Invalid selection.")
+        end
+    end
+end, function()
+    listenForCommands(interface)
+end)
+ 
