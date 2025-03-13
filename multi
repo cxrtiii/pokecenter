@@ -1,0 +1,5 @@
+local speakers = table.pack(peripheral.find("speaker"))
+
+for i = 1, speakers.n do
+  speakers[i].playSound(bla bla bla)
+end
